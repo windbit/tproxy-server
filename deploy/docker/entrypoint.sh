@@ -6,6 +6,7 @@
 # TPROXY_SECRET            32 hex, тот же secret в ссылке клиента
 # TPROXY_TOKEN_KEY         base64 от 32 случайных байт; меняется — рвутся все сессии
 # TPROXY_TRUSTED_PROXIES   CIDR фронт-прокси через запятую (сеть Traefik)
+# TPROXY_BASE_PATH         необязательный префикс транспорта (BASE_PATH.md); пусто — корень
 set -euo pipefail
 
 : "${TPROXY_HOSTNAME:?}" "${TPROXY_SECRET:?}" "${TPROXY_TOKEN_KEY:?}" "${TPROXY_TRUSTED_PROXIES:?}"
@@ -44,6 +45,7 @@ write_relay_config() {
 	cat > "$RELAY_DIR/config.json" <<JSON
 {
   "public_hostname": "$TPROXY_HOSTNAME",
+  "base_path": "${TPROXY_BASE_PATH:-}",
   "listen": "0.0.0.0:8080",
   "admin_listen": "127.0.0.1:8081",
   "public_dir": "/srv/site",
