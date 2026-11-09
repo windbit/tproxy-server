@@ -3,13 +3,14 @@
 # упал любой — контейнер выходит, оркестратор его перезапускает.
 #
 # TPROXY_HOSTNAME          домен прокси
-# TPROXY_SECRET            32 hex, тот же secret в ссылке клиента
+# TPROXY_PROFILES          профили имя=secret через запятую, secret — 32 hex;
+#                          у каждого профиля своя ссылка, отзыв = убрать строку
 # TPROXY_TOKEN_KEY         base64 от 32 случайных байт; меняется — рвутся все сессии
 # TPROXY_TRUSTED_PROXIES   CIDR фронт-прокси через запятую (сеть Traefik)
 # TPROXY_BASE_PATH         необязательный префикс транспорта (BASE_PATH.md); пусто — корень
 set -euo pipefail
 
-: "${TPROXY_HOSTNAME:?}" "${TPROXY_SECRET:?}" "${TPROXY_TOKEN_KEY:?}" "${TPROXY_TRUSTED_PROXIES:?}"
+: "${TPROXY_HOSTNAME:?}" "${TPROXY_PROFILES:?}" "${TPROXY_TOKEN_KEY:?}" "${TPROXY_TRUSTED_PROXIES:?}"
 MTPROXY_WORKERS="${MTPROXY_WORKERS:-1}"
 MTPROXY_MAX_CONNECTIONS="${MTPROXY_MAX_CONNECTIONS:-4096}"
 MTPROXY_PORT=2398
@@ -22,17 +23,35 @@ install -d -o tproxy -g tproxy -m 0700 "$RELAY_DIR"
 install -d -o root -g mtproxy -m 0750 "$MTPROXY_DIR"
 
 main() {
+	parse_profiles
 	write_relay_config
 	fetch_telegram_file https://core.telegram.org/getProxySecret "$MTPROXY_DIR/proxy-secret"
 	fetch_telegram_file https://core.telegram.org/getProxyConfig "$MTPROXY_DIR/proxy-multi.conf"
 
-	mtproto-proxy -u mtproxy -p 8888 -H "$MTPROXY_PORT" -S "$TPROXY_SECRET" $(nat_args) \
+	mtproto-proxy -u mtproxy -p 8888 -H "$MTPROXY_PORT" "${MTPROXY_SECRET_ARGS[@]}" $(nat_args) \
 		--aes-pwd "$MTPROXY_DIR/proxy-secret" "$MTPROXY_DIR/proxy-multi.conf" \
 		-M "$MTPROXY_WORKERS" -C "$MTPROXY_MAX_CONNECTIONS" &
 	setpriv --reuid tproxy --regid tproxy --init-groups tproxy-server -config "$RELAY_DIR/config.json" &
 	watch_telegram_config &
 	wait -n
 	exit 1
+}
+
+parse_profiles() {
+	local entry entries name secret profiles=()
+	MTPROXY_SECRET_ARGS=()
+	IFS=',' read -ra entries <<< "$TPROXY_PROFILES"
+	for entry in "${entries[@]}"; do
+		name="${entry%%=*}"
+		secret="${entry#*=}"
+		if [[ ! "$name" =~ ^[A-Za-z0-9_-]{1,64}$ || ! "$secret" =~ ^[0-9a-f]{32}$ ]]; then
+			echo "TPROXY_PROFILES: expected name=<32 hex>, got profile '${name}'" >&2
+			exit 1
+		fi
+		profiles+=("{\"name\":\"$name\",\"secret\":\"$secret\",\"backend\":\"127.0.0.1:$MTPROXY_PORT\"}")
+		MTPROXY_SECRET_ARGS+=(-S "$secret")
+	done
+	PROFILES_JSON="{\"profiles\":[$(IFS=','; echo "${profiles[*]}")]}"
 }
 
 write_relay_config() {
@@ -55,9 +74,7 @@ write_relay_config() {
   "trusted_proxies": $trusted
 }
 JSON
-	cat > "$RELAY_DIR/profiles.json" <<JSON
-{"profiles":[{"name":"default","secret":"$TPROXY_SECRET","backend":"127.0.0.1:$MTPROXY_PORT"}]}
-JSON
+	printf '%s\n' "$PROFILES_JSON" > "$RELAY_DIR/profiles.json"
 	chown tproxy:tproxy "$RELAY_DIR"/*
 	chmod 0400 "$RELAY_DIR"/*
 }
