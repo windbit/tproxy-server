@@ -111,20 +111,22 @@ type Timeouts struct {
 }
 
 type Config struct {
-	PublicHostname   string    `json:"public_hostname"`
-	BasePath         string    `json:"base_path"`
-	Listen           string    `json:"listen"`
-	AdminListen      string    `json:"admin_listen"`
-	PublicDir        string    `json:"public_dir"`
-	PublicUpstream   string    `json:"public_upstream"`
-	StaticRoutes     string    `json:"static_routes"`
-	TokenKeyFile     string    `json:"token_key_file"`
-	ProfilesFile     string    `json:"profiles_file"`
-	EnablePprof      bool      `json:"enable_pprof"`
-	Limits           Limits    `json:"limits"`
-	Timeouts         Timeouts  `json:"timeouts"`
-	Profiles         []Profile `json:"-"`
-	LegacyTokenDrain bool      `json:"-"`
+	PublicHostname   string       `json:"public_hostname"`
+	BasePath         string       `json:"base_path"`
+	Listen           string       `json:"listen"`
+	AdminListen      string       `json:"admin_listen"`
+	PublicDir        string       `json:"public_dir"`
+	PublicUpstream   string       `json:"public_upstream"`
+	StaticRoutes     string       `json:"static_routes"`
+	TokenKeyFile     string       `json:"token_key_file"`
+	ProfilesFile     string       `json:"profiles_file"`
+	EnablePprof      bool         `json:"enable_pprof"`
+	TrustedProxies   []string     `json:"trusted_proxies"`
+	Limits           Limits       `json:"limits"`
+	Timeouts         Timeouts     `json:"timeouts"`
+	Profiles         []Profile    `json:"-"`
+	LegacyTokenDrain bool         `json:"-"`
+	TrustedNets      []*net.IPNet `json:"-"`
 }
 
 type profileFile struct {
@@ -267,6 +269,11 @@ func Load(path string, profilesOverride ...string) (Config, error) {
 	if len(profilesOverride) == 1 && profilesOverride[0] != "" {
 		result.ProfilesFile = profilesOverride[0]
 	}
+	trusted, err := parseTrustedProxies(result.TrustedProxies)
+	if err != nil {
+		return Config{}, fmt.Errorf("trusted_proxies: %w", err)
+	}
+	result.TrustedNets = trusted
 	if err := result.validate(); err != nil {
 		return Config{}, err
 	}
@@ -291,7 +298,11 @@ func (c Config) validate() error {
 	if err := ValidateBasePath(c.BasePath); err != nil {
 		return fmt.Errorf("base_path: %w", err)
 	}
-	if err := validateLoopbackAddress(c.Listen); err != nil {
+	validateListen := validateLoopbackAddress
+	if c.BehindTrustedProxy() {
+		validateListen = validateNumericAddress
+	}
+	if err := validateListen(c.Listen); err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
 	if err := validateLoopbackAddress(c.AdminListen); err != nil {
@@ -481,6 +492,57 @@ func DecodeSecret(value string) ([]byte, error) {
 	return decoded, nil
 }
 
+// BehindTrustedProxy reports a container deployment: a front proxy on another
+// address terminates TLS, so the relay listens beyond loopback.
+func (c Config) BehindTrustedProxy() bool {
+	return len(c.TrustedNets) > 0
+}
+
+// TrustsPeer reports whether a direct peer is the front proxy whose
+// X-Forwarded-For carries the client address.
+func (c Config) TrustsPeer(ip net.IP) bool {
+	if ip.IsLoopback() {
+		return true
+	}
+	for _, network := range c.TrustedNets {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseTrustedProxies(values []string) ([]*net.IPNet, error) {
+	result := make([]*net.IPNet, 0, len(values))
+	for _, value := range values {
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, network)
+	}
+	return result, nil
+}
+
+func validateNumericAddress(address string) error {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	if net.ParseIP(host) == nil {
+		return errors.New("must use a numeric address")
+	}
+	return validatePort(port)
+}
+
+func validatePort(port string) error {
+	value, err := strconv.Atoi(port)
+	if err != nil || value < 1 || value > 65535 {
+		return errors.New("invalid port")
+	}
+	return nil
+}
+
 func validateLoopbackAddress(address string) error {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
@@ -490,11 +552,7 @@ func validateLoopbackAddress(address string) error {
 	if ip == nil || !ip.IsLoopback() {
 		return errors.New("must use a numeric loopback address")
 	}
-	value, err := strconv.Atoi(port)
-	if err != nil || value < 1 || value > 65535 {
-		return errors.New("invalid port")
-	}
-	return nil
+	return validatePort(port)
 }
 
 func validatePublicUpstream(raw string) error {

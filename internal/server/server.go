@@ -619,8 +619,8 @@ func (s *Server) clientIP(r *http.Request) (string, error) {
 		return "", err
 	}
 	peer := net.ParseIP(host)
-	if peer == nil || !peer.IsLoopback() {
-		return "", errors.New("request did not arrive through loopback proxy")
+	if peer == nil || !s.config.TrustsPeer(peer) {
+		return "", errors.New("request did not arrive through a trusted proxy")
 	}
 	forwarded := r.Header.Get("X-Forwarded-For")
 	if forwarded == "" {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -280,5 +281,40 @@ func TestCarrierBatchMustFitDesktopLoopbackCap(t *testing.T) {
 func TestDefaultReconnectGraceIsShort(t *testing.T) {
 	if Defaults().Timeouts.ReconnectGrace.Value() != 2*time.Minute {
 		t.Fatal("reconnect_grace default is not 2m")
+	}
+}
+
+func TestTrustedProxiesAllowNonLoopbackListen(t *testing.T) {
+	directory := t.TempDir()
+	profiles := `{"profiles":[{"name":"default","secret":"000102030405060708090a0b0c0d0e0f","backend":"127.0.0.1:2398"}]}`
+	if err := os.WriteFile(filepath.Join(directory, "profiles.json"), []byte(profiles), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(directory, "public"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "public", "index.html"), []byte("site"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	load := func(extra string) (Config, error) {
+		server := `{"public_hostname":"proxy.example.com","public_dir":"public","profiles_file":"profiles.json","listen":"0.0.0.0:8080"` + extra + `}`
+		path := filepath.Join(directory, "config.json")
+		if err := os.WriteFile(path, []byte(server), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(path)
+	}
+	if _, err := load(""); err == nil {
+		t.Fatal("non-loopback listen accepted without trusted_proxies")
+	}
+	if _, err := load(`,"trusted_proxies":["not-a-cidr"]`); err == nil {
+		t.Fatal("invalid trusted_proxies accepted")
+	}
+	loaded, err := load(`,"trusted_proxies":["10.0.1.0/24"]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.TrustsPeer(net.ParseIP("10.0.1.5")) || !loaded.TrustsPeer(net.ParseIP("127.0.0.1")) || loaded.TrustsPeer(net.ParseIP("192.0.2.1")) {
+		t.Fatal("unexpected trusted peer decision")
 	}
 }

@@ -938,3 +938,21 @@ func readResponse(t *testing.T, response *http.Response) []byte {
 	}
 	return body
 }
+
+func TestClientIPTrustsConfiguredProxy(t *testing.T) {
+	_, network, err := net.ParseCIDR("10.0.1.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{config: config.Config{TrustedNets: []*net.IPNet{network}}}
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "10.0.1.5:40000"
+	request.Header.Set("X-Forwarded-For", "198.51.100.7")
+	if ip, err := server.clientIP(request); err != nil || ip != "198.51.100.7" {
+		t.Fatalf("trusted proxy: got %q, %v", ip, err)
+	}
+	request.RemoteAddr = "192.0.2.1:40000"
+	if _, err := server.clientIP(request); err == nil {
+		t.Fatal("untrusted peer accepted")
+	}
+}
